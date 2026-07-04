@@ -1,0 +1,65 @@
+
+#rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.dll
+*.so
+*.dylib
+*.rlib
+*.exp
+*.lib
+*.a
+
+
+
+#IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+#Editor-specific
+*.iml
+*.class
+.project
+.classpath
+.settings/
+
+#OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+#Benchmark results
+/target/criterion/
+*.csv
+*.html
+*.svg
+
+#Test databases
+*.db
+*.db-wal
+*.db-shm
+
+#Documentation
+/target/doc/
+docs/book/
+
+#Temporary files
+tmp/
+temp/
+*.tmp
+
+# environment files
+.env
+.env.local
+.env.*.local
+
+*.log
+
+*.profraw
+*.profdata
+target/cov/
