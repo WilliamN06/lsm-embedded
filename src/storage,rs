@@ -1,0 +1,108 @@
+//! Storage abstraction with write_at/read_at support
+//!
+//! Design decision: Use custom trait instead of embedded-io directly.
+//! Rationale: embedded-io doesn't provide seek in all implementations.
+//! Our trait supports random access, which is essential for LSM.
+
+use core::fmt::Debug;
+use core::cell::RefCell;
+
+/// Storage backend abstraction
+pub trait Storage {
+    type Error: Debug + 'static;
+
+    /// Write data at a specific offset
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), Self::Error>;
+
+    /// Read data from a specific offset
+    fn read_at(&mut self, offset: u64, data: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Flush any buffered data to durable storage
+    fn sync(&mut self) -> Result<(), Self::Error>;
+
+    /// Get the total storage capacity
+    fn capacity(&self) -> u64;
+}
+
+/// In-memory storage for testing
+#[cfg(feature = "std")]
+pub struct InMemoryStorage {
+    data: std::collections::BTreeMap<u64, u8>,
+    capacity: u64,
+}
+
+#[cfg(feature = "std")]
+impl InMemoryStorage {
+    pub fn new() -> Self {
+        Self {
+            data: std::collections::BTreeMap::new(),
+            capacity: 1024 * 1024 * 100, // 100MB
+        }
+    }
+
+    pub fn with_capacity(capacity: u64) -> Self {
+        Self {
+            data: std::collections::BTreeMap::new(),
+            capacity,
+        }
+    }
+
+    // Get the actual data (for testing)
+    pub fn get_data(&self) -> &std::collections::BTreeMap<u64, u8> {
+        &self.data
+    }
+
+    /// Clear all data
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+}
+
+#[cfg(feature = "std")]
+impl Storage for InMemoryStorage {
+    type Error = std::io::Error;
+
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), Self::Error> {
+        for (i, byte) in data.iter().enumerate() {
+            self.data.insert(offset + i as u64, *byte);
+        }
+        Ok(())
+    }
+
+    fn read_at(&mut self, offset: u64, data: &mut [u8]) -> Result<(), Self::Error> {
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = *self.data.get(&(offset + i as u64)).unwrap_or(&0);
+        }
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn capacity(&self) -> u64 {
+        self.capacity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_in_memory_storage() {
+        let mut storage = InMemoryStorage::new();
+        let data = [1, 2, 3, 4, 5];
+        
+        storage.write_at(10, &data).unwrap();
+        
+        let mut buf = [0u8; 5];
+        storage.read_at(10, &mut buf).unwrap();
+        assert_eq!(buf, data);
+        
+        //Read beyond written data should return zeros
+        let mut buf2 = [0u8; 3];
+        storage.read_at(15, &mut buf2).unwrap();
+        assert_eq!(buf2, [0, 0, 0]);
+    }
+}
