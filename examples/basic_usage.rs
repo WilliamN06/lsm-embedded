@@ -1,69 +1,41 @@
-//! Basic usage example for lsm-embedded
-//!
-//! This demonstrates the core functionality:
-//! 1. Create a memtable
-//! 2. Insert some data
-//! 3. Flush to SSTable
-//! 4. Read it back
-
-use lsm_embedded::{Memtable, SSTable, storage::InMemoryStorage, DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE, DEFAULT_CAPACITY};
+use lsm_embedded::{Memtable, compaction::CompactionManager, storage::InMemoryStorage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== lsm-embedded Basic Example ===");
-    println!();
+    println!("=== lsm-embedded Basic Example with Compaction ===");
 
-    // 1. Create storage
     let mut storage = InMemoryStorage::new();
-    println!("✅ Storage created (in-memory)");
+    let mut compactor = CompactionManager::<3, 3, 5>::new();
 
-    // 2. Create memtable
-    let mut memtable = Memtable::<DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE, DEFAULT_CAPACITY>::new();
-    println!("✅ Memtable created (capacity: {} entries)", DEFAULT_CAPACITY);
-
-    // 3. Insert some data
-    let value = b"Hello, LSM World!";
-    for i in 0..5 {
-        let mut key = [0u8; DEFAULT_KEY_SIZE];
-        key[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-        memtable.insert(&key, value)?;
-        println!("✅ Inserted key: {}", i);
+    for batch in 0..2 {
+        println!("Batch {}: Inserting 3 entries", batch);
+        let mut memtable = Memtable::<16, 128, 4>::new();
+        let value = b"Test";
+        
+        for i in 0..3 {
+            let mut key = [0u8; 16];
+            key[0..4].copy_from_slice(&((batch * 10 + i) as u32).to_le_bytes());
+            memtable.insert(&key, value)?;
+        }
+        
+        compactor.flush_memtable(&memtable, &mut storage)?;
+        compactor.maybe_compact(&mut storage)?;
+        
+        let stats = compactor.stats();
+        println!("  Total: {} tables, {} bytes", 
+            stats.total_tables, stats.total_size);
     }
 
-    // 4. Read from memtable
-    let test_key = [0u8; DEFAULT_KEY_SIZE];
-    if let Some(data) = memtable.get(&test_key) {
-        println!("✅ Read from memtable: {:?}", core::str::from_utf8(data)?);
-    }
-
-    // 5. Flush to SSTable
-    let sstable = SSTable::<10>::from_memtable(&memtable, 1);
-    sstable.write(&mut storage, 0)?;
-    println!("✅ Flushed to SSTable ({} blocks)", sstable.blocks.len());
-
-    // 6. Clear memtable
-    memtable.clear();
-    println!("✅ Cleared memtable");
-
-    // 7. Read from SSTable
-    let read_sstable = SSTable::<10>::read(&mut storage, 0)?;
-    println!("✅ Read SSTable ({} blocks, {} keys)", 
-        read_sstable.blocks.len(), read_sstable.metadata.key_count);
-
-    // 8. Verify data
-    if let Some(data) = read_sstable.get(&test_key) {
-        println!("✅ Verified data: {:?}", core::str::from_utf8(data)?);
-    }
-
-    // 9. Test all keys
-    println!("\nReading all keys:");
-    for i in 0..5 {
-        let mut key = [0u8; DEFAULT_KEY_SIZE];
-        key[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-        if let Some(data) = read_sstable.get(&key) {
-            println!("  Key {}: {:?}", i, core::str::from_utf8(data)?);
+    println!("Verifying data...");
+    for batch in 0..2 {
+        for i in 0..3 {
+            let mut key = [0u8; 16];
+            key[0..4].copy_from_slice(&((batch * 10 + i) as u32).to_le_bytes());
+            if let Some(_data) = compactor.get(&key) {
+                println!("  Key {}: Found", batch * 10 + i);
+            }
         }
     }
 
-    println!("\n✅ Basic usage test complete!");
+    println!("Basic usage with compaction complete");
     Ok(())
 }

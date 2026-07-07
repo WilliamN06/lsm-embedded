@@ -1,0 +1,49 @@
+[package]
+name = "lsm-embedded"
+version = "0.1.0"
+edition = "2021"
+description = "Write-optimised LSM storage for WASM and embedded devices"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/lsm-embedded"
+homepage = "https://github.com/yourusername/lsm-embedded"
+readme = "README.md"
+keywords = ["lsm", "embedded", "no-std", "wasm", "storage"]
+categories = ["embedded", "database", "wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+heapless = { version = "0.8", default-features = false }
+crc32fast = { version = "1.4", default-features = false }
+embedded-io = { version = "0.6", default-features = false }
+hash32 = { version = "0.3", default-features = false }
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"
+serial_test = "2.0"
+
+[features]
+default = ["std"]
+std = ["embedded-io/std"]
+alloc = []
+logging = ["log"]
+wasm = ["wasm-bindgen"]
+
+[[example]]
+name = "basic_usage"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

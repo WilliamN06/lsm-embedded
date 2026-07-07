@@ -1,90 +1,74 @@
-//! Arena-allocated memtable with fixed-size B-tree
-//!
-//! Design decision: Use fixed-size arena instead of heap-allocated skip list.
-//! Rationale: Target environments (WASM, embedded ARM) don't have a global
-//! allocator in `no_std` mode. Fixed-size arena makes memory predictable.
-
 use core::fmt::Debug;
-use heapless::{FnvIndexMap, Vec};
+use heapless::{FnvIndexMap, Vec as HeaplessVec};
+use alloc::vec::Vec;
 
-/// Entry in the memtable — fixed size, stored in arena
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Entry<const K_SIZE: usize, const V_SIZE: usize> {
     pub key: [u8; K_SIZE],
-    pub value_offset: usize,  // Offset into the value arena
-    pub value_len: u16,       // Actual length (<= V_SIZE)
+    pub value_offset: usize,
+    pub value_len: u16,
 }
 
-/// Memtable with arena allocation
-///
-/// # Type Parameters
-/// - `K_SIZE`: Fixed key size in bytes (e.g., 16 for timestamp+sequence)
-/// - `V_SIZE`: Maximum value size in bytes (e.g., 1KB)
-/// - `CAPACITY`: Maximum number of entries (determines memory usage)
 pub struct Memtable<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> {
-    /// Entries stored in a fixed-size vector
-    entries: Vec<Entry<K_SIZE, V_SIZE>, CAPACITY>,
-    /// Index mapping keys to entry indices
+    entries: HeaplessVec<Entry<K_SIZE, V_SIZE>, CAPACITY>,
     index: FnvIndexMap<[u8; K_SIZE], usize, CAPACITY>,
-    /// Arena for storing values
-    arena: [u8; V_SIZE * CAPACITY],
-    /// Current position in arena
+    arena: Vec<u8>,
+    arena_capacity: usize,
     arena_pos: usize,
-    /// Total bytes used
     total_bytes: usize,
 }
+
 
 impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> 
     Memtable<K_SIZE, V_SIZE, CAPACITY> 
 {
-    /// Create a new empty memtable
     pub fn new() -> Self {
+        let arena_capacity = V_SIZE * CAPACITY;
         Self {
-            entries: Vec::new(),
+            entries: HeaplessVec::new(),
             index: FnvIndexMap::new(),
-            arena: [0u8; V_SIZE * CAPACITY],
+            arena: Vec::new(),
+            arena_capacity,
             arena_pos: 0,
             total_bytes: 0,
         }
     }
 
-    /// Insert a key-value pair
-    ///
-    /// Returns `Ok(())` if inserted, `Err` if full or key exists.
     pub fn insert(&mut self, key: &[u8; K_SIZE], value: &[u8]) -> Result<(), MemtableError> {
-        // Check capacity
         if self.entries.len() >= CAPACITY {
             return Err(MemtableError::Full);
         }
 
-        // Check if key already exists
         if self.index.contains_key(key) {
             return Err(MemtableError::KeyExists);
         }
 
-        // Check value size
         if value.len() > V_SIZE {
             return Err(MemtableError::ValueTooLarge);
         }
 
-        // Check arena space
-        if self.arena_pos + value.len() > self.arena.len() {
+        if self.arena_pos + value.len() > self.arena_capacity {
             return Err(MemtableError::ArenaFull);
         }
 
-        // Store value in arena
+        if self.arena.len() < self.arena_pos + value.len() {
+            let needed = self.arena_pos + value.len();
+            if needed > self.arena_capacity {
+                return Err(MemtableError::ArenaFull);
+            }
+            self.arena.resize(needed, 0);
+        }
+
         let offset = self.arena_pos;
         self.arena[offset..offset + value.len()].copy_from_slice(value);
         self.arena_pos += value.len();
 
-        // Create entry
         let entry = Entry {
             key: *key,
             value_offset: offset,
             value_len: value.len() as u16,
         };
 
-        // Store entry
         let idx = self.entries.len();
         self.entries.push(entry).map_err(|_| MemtableError::Full)?;
         self.index.insert(*key, idx).map_err(|_| MemtableError::Full)?;
@@ -93,37 +77,34 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
         Ok(())
     }
 
-    /// Get a value by key
     pub fn get(&self, key: &[u8; K_SIZE]) -> Option<&[u8]> {
         let idx = *self.index.get(key)?;
         let entry = &self.entries[idx];
         let start = entry.value_offset;
         let end = start + entry.value_len as usize;
-        Some(&self.arena[start..end])
+        if end <= self.arena.len() {
+            Some(&self.arena[start..end])
+        } else {
+            None
+        }
     }
 
-    /// Check if memtable is full
     pub fn is_full(&self) -> bool {
         self.entries.len() >= CAPACITY
     }
 
-    /// Number of entries
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Total bytes used (keys + values)
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
-    /// Iterate over entries in insertion order
-    /// Used for flushing to SSTable
     pub fn iter(&self) -> MemtableIter<K_SIZE, V_SIZE, CAPACITY> {
         MemtableIter {
             memtable: self,
@@ -131,16 +112,15 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
         }
     }
 
-    /// Clear the memtable (reuse arena)
     pub fn clear(&mut self) {
         self.entries.clear();
         self.index.clear();
+        self.arena.clear();
         self.arena_pos = 0;
         self.total_bytes = 0;
     }
 }
 
-/// Iterator over memtable entries
 pub struct MemtableIter<'a, const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> {
     memtable: &'a Memtable<K_SIZE, V_SIZE, CAPACITY>,
     pos: usize,
@@ -157,8 +137,13 @@ impl<'a, const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> Iterat
         }
         let entry = &self.memtable.entries[self.pos];
         self.pos += 1;
-        let value = &self.memtable.arena[entry.value_offset..entry.value_offset + entry.value_len as usize];
-        Some((&entry.key, value))
+        let start = entry.value_offset;
+        let end = start + entry.value_len as usize;
+        if end <= self.memtable.arena.len() {
+            Some((&entry.key, &self.memtable.arena[start..end]))
+        } else {
+            None
+        }
     }
 }
 
@@ -181,6 +166,9 @@ impl core::fmt::Display for MemtableError {
         }
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for MemtableError {}
 
 #[cfg(test)]
 mod tests {
@@ -209,7 +197,6 @@ mod tests {
             assert!(mt.insert(&key, &value).is_ok());
         }
         
-        // 11th insert should fail
         let mut key = [0u8; 16];
         key[0] = 10;
         assert_eq!(mt.insert(&key, &value), Err(MemtableError::Full));
@@ -219,7 +206,7 @@ mod tests {
     fn test_value_too_large() {
         let mut mt = TestMemtable::new();
         let key = [1u8; 16];
-        let value = [2u8; 1025]; // > V_SIZE (1024)
+        let value = [2u8; 1025];
         assert_eq!(mt.insert(&key, &value), Err(MemtableError::ValueTooLarge));
     }
 

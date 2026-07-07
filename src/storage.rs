@@ -1,30 +1,41 @@
-//! Storage abstraction with write_at/read_at support
-//!
-//! Design decision: Use custom trait instead of embedded-io directly.
-//! Rationale: embedded-io doesn't provide seek in all implementations.
-//! Our trait supports random access, which is essential for LSM.
-
 use core::fmt::Debug;
-use core::cell::RefCell;
 
-/// Storage backend abstraction
 pub trait Storage {
-    type Error: Debug + 'static;
+    type Error: Debug + 'static + From<StorageError>;
 
-    /// Write data at a specific offset
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), Self::Error>;
-
-    /// Read data from a specific offset
     fn read_at(&mut self, offset: u64, data: &mut [u8]) -> Result<(), Self::Error>;
-
-    /// Flush any buffered data to durable storage
     fn sync(&mut self) -> Result<(), Self::Error>;
-
-    /// Get the total storage capacity
     fn capacity(&self) -> u64;
 }
 
-/// In-memory storage for testing
+#[derive(Debug, PartialEq)]
+pub enum StorageError {
+    Io,
+    Corruption,
+    Full,
+    NotFound,
+}
+
+impl StorageError {
+    pub fn corruption() -> Self {
+        Self::Corruption
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<StorageError> for std::io::Error {
+    fn from(err: StorageError) -> Self {
+        use std::io::ErrorKind;
+        match err {
+            StorageError::Io => ErrorKind::Other.into(),
+            StorageError::Corruption => ErrorKind::InvalidData.into(),
+            StorageError::Full => ErrorKind::StorageFull.into(),
+            StorageError::NotFound => ErrorKind::NotFound.into(),
+        }
+    }
+}
+
 #[cfg(feature = "std")]
 pub struct InMemoryStorage {
     data: std::collections::BTreeMap<u64, u8>,
@@ -36,7 +47,7 @@ impl InMemoryStorage {
     pub fn new() -> Self {
         Self {
             data: std::collections::BTreeMap::new(),
-            capacity: 1024 * 1024 * 100, // 100MB
+            capacity: 1024 * 1024 * 100,
         }
     }
 
@@ -45,16 +56,6 @@ impl InMemoryStorage {
             data: std::collections::BTreeMap::new(),
             capacity,
         }
-    }
-
-    // Get the actual data (for testing)
-    pub fn get_data(&self) -> &std::collections::BTreeMap<u64, u8> {
-        &self.data
-    }
-
-    /// Clear all data
-    pub fn clear(&mut self) {
-        self.data.clear();
     }
 }
 
@@ -100,7 +101,6 @@ mod tests {
         storage.read_at(10, &mut buf).unwrap();
         assert_eq!(buf, data);
         
-        //Read beyond written data should return zeros
         let mut buf2 = [0u8; 3];
         storage.read_at(15, &mut buf2).unwrap();
         assert_eq!(buf2, [0, 0, 0]);

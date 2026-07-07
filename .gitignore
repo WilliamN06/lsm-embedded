@@ -63,3 +63,5 @@ temp/
 *.profraw
 *.profdata
 target/cov/
+
+Cargo.lock
