@@ -38,20 +38,20 @@ alloc = []
 logging = ["log"]
 wasm = ["wasm-bindgen", "js-sys"]
 
-# [[bench]]
-# name = "throughput"
-# harness = false
+[[bench]]
+name = "throughput"
+harness = false
 
-# [[bench]]
-# name = "cache_hit_rate"
-# harness = false
+[[bench]]
+name = "cache_hit_rate"
+harness = false
 
 [[example]]
 name = "basic_usage"
 
-# [[example]]
-# name = "wasm_demo"
-# crate-type = ["cdylib"]
+[[example]]
+name = "wasm_demo"
+crate-type = ["cdylib"]
 
 [profile.dev]
 opt-level = 0
