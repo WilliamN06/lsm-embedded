@@ -7,6 +7,7 @@ authors = ["Your Name <your.email@example.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourusername/lsm-embedded"
 homepage = "https://github.com/yourusername/lsm-embedded"
+documentation = "https://docs.rs/lsm-embedded"
 readme = "README.md"
 keywords = ["lsm", "embedded", "no-std", "wasm", "storage"]
 categories = ["embedded", "database", "wasm"]
@@ -35,10 +36,22 @@ default = ["std"]
 std = ["embedded-io/std"]
 alloc = []
 logging = ["log"]
-wasm = ["wasm-bindgen"]
+wasm = ["wasm-bindgen", "js-sys"]
+
+# [[bench]]
+# name = "throughput"
+# harness = false
+
+# [[bench]]
+# name = "cache_hit_rate"
+# harness = false
 
 [[example]]
 name = "basic_usage"
+
+# [[example]]
+# name = "wasm_demo"
+# crate-type = ["cdylib"]
 
 [profile.dev]
 opt-level = 0
