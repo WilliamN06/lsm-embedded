@@ -1,41 +1,42 @@
 use core::fmt::Debug;
-use heapless::{FnvIndexMap, Vec as HeaplessVec};
 use alloc::vec::Vec;
+use hashbrown::HashMap;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct Entry<const K_SIZE: usize, const V_SIZE: usize> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry<const K_SIZE: usize> {
     pub key: [u8; K_SIZE],
     pub value_offset: usize,
     pub value_len: u16,
 }
 
-pub struct Memtable<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> {
-    entries: HeaplessVec<Entry<K_SIZE, V_SIZE>, CAPACITY>,
-    index: FnvIndexMap<[u8; K_SIZE], usize, CAPACITY>,
+pub struct Memtable<const K_SIZE: usize, const V_SIZE: usize> {
+    entries: Vec<Entry<K_SIZE>>,
+    index: HashMap<[u8; K_SIZE], usize>,
     arena: Vec<u8>,
     arena_capacity: usize,
     arena_pos: usize,
     total_bytes: usize,
+    max_entries: usize,
 }
 
-
-impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> 
-    Memtable<K_SIZE, V_SIZE, CAPACITY> 
+impl<const K_SIZE: usize, const V_SIZE: usize> 
+    Memtable<K_SIZE, V_SIZE> 
 {
-    pub fn new() -> Self {
-        let arena_capacity = V_SIZE * CAPACITY;
+    pub fn new(capacity: usize) -> Self {
+        let arena_capacity = V_SIZE * capacity;
         Self {
-            entries: HeaplessVec::new(),
-            index: FnvIndexMap::new(),
-            arena: Vec::new(),
+            entries: Vec::with_capacity(capacity),
+            index: HashMap::with_capacity(capacity),
+            arena: Vec::with_capacity(arena_capacity),
             arena_capacity,
             arena_pos: 0,
             total_bytes: 0,
+            max_entries: capacity,
         }
     }
 
     pub fn insert(&mut self, key: &[u8; K_SIZE], value: &[u8]) -> Result<(), MemtableError> {
-        if self.entries.len() >= CAPACITY {
+        if self.entries.len() >= self.max_entries {
             return Err(MemtableError::Full);
         }
 
@@ -70,8 +71,8 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
         };
 
         let idx = self.entries.len();
-        self.entries.push(entry).map_err(|_| MemtableError::Full)?;
-        self.index.insert(*key, idx).map_err(|_| MemtableError::Full)?;
+        self.entries.push(entry);
+        self.index.insert(*key, idx);
         self.total_bytes += K_SIZE + value.len();
 
         Ok(())
@@ -90,7 +91,7 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
     }
 
     pub fn is_full(&self) -> bool {
-        self.entries.len() >= CAPACITY
+        self.entries.len() >= self.max_entries
     }
 
     pub fn len(&self) -> usize {
@@ -105,11 +106,12 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
         self.total_bytes
     }
 
-    pub fn iter(&self) -> MemtableIter<K_SIZE, V_SIZE, CAPACITY> {
-        MemtableIter {
-            memtable: self,
-            pos: 0,
-        }
+     pub fn iter(&self) -> MemtableIter<'_, K_SIZE> {
+    MemtableIter {
+        entries: &self.entries,
+        arena: &self.arena,
+        pos: 0,
+      }
     }
 
     pub fn clear(&mut self) {
@@ -121,26 +123,27 @@ impl<const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize>
     }
 }
 
-pub struct MemtableIter<'a, const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> {
-    memtable: &'a Memtable<K_SIZE, V_SIZE, CAPACITY>,
+pub struct MemtableIter<'a, const K_SIZE: usize> {
+    entries: &'a [Entry<K_SIZE>],
+    arena: &'a [u8],
     pos: usize,
 }
 
-impl<'a, const K_SIZE: usize, const V_SIZE: usize, const CAPACITY: usize> Iterator
-    for MemtableIter<'a, K_SIZE, V_SIZE, CAPACITY> 
+impl<'a, const K_SIZE: usize> Iterator
+    for MemtableIter<'a, K_SIZE> 
 {
     type Item = (&'a [u8; K_SIZE], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.memtable.entries.len() {
+        if self.pos >= self.entries.len() {
             return None;
         }
-        let entry = &self.memtable.entries[self.pos];
+        let entry = &self.entries[self.pos];
         self.pos += 1;
         let start = entry.value_offset;
         let end = start + entry.value_len as usize;
-        if end <= self.memtable.arena.len() {
-            Some((&entry.key, &self.memtable.arena[start..end]))
+        if end <= self.arena.len() {
+            Some((&entry.key, &self.arena[start..end]))
         } else {
             None
         }
@@ -174,11 +177,11 @@ impl std::error::Error for MemtableError {}
 mod tests {
     use super::*;
 
-    type TestMemtable = Memtable<16, 1024, 10>;
+    type TestMemtable = Memtable<16, 1024>;
 
     #[test]
     fn test_insert_and_get() {
-        let mut mt = TestMemtable::new();
+        let mut mt = TestMemtable::new(10);
         let key = [1u8; 16];
         let value = [2u8; 100];
         
@@ -188,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_full_capacity() {
-        let mut mt = TestMemtable::new();
+        let mut mt = TestMemtable::new(10);
         let value = [0u8; 100];
         
         for i in 0..10 {
@@ -204,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_value_too_large() {
-        let mut mt = TestMemtable::new();
+        let mut mt = TestMemtable::new(10);
         let key = [1u8; 16];
         let value = [2u8; 1025];
         assert_eq!(mt.insert(&key, &value), Err(MemtableError::ValueTooLarge));
@@ -212,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_iteration() {
-        let mut mt = TestMemtable::new();
+        let mut mt = TestMemtable::new(10);
         let value = [42u8; 50];
         
         for i in 0..5 {
@@ -232,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut mt = TestMemtable::new();
+        let mut mt = TestMemtable::new(10);
         let key = [1u8; 16];
         let value = [2u8; 100];
         mt.insert(&key, &value).unwrap();

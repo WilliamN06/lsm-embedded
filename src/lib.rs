@@ -24,9 +24,7 @@ pub use bloom::PartitionedBloom;
 
 pub const BLOCK_SIZE: usize = 4096;
 pub const DEFAULT_KEY_SIZE: usize = 16;
-pub const DEFAULT_VALUE_SIZE: usize = 128;
-pub const DEFAULT_CAPACITY: usize = 8;
-pub const CACHE_SLOTS: usize = 512;
+pub const DEFAULT_VALUE_SIZE: usize = 1024;
 
 #[cfg(test)]
 mod tests {
@@ -36,7 +34,7 @@ mod tests {
     #[test]
     fn test_basic_write_read() {
         let mut storage = InMemoryStorage::new();
-        let mut memtable = Memtable::<DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE, DEFAULT_CAPACITY>::new();
+        let mut memtable = Memtable::<DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE>::new(10);
 
         let key = [1u8; DEFAULT_KEY_SIZE];
         let value = b"Hello, LSM!";
@@ -44,10 +42,10 @@ mod tests {
 
         assert_eq!(memtable.get(&key), Some(&value[..]));
 
-        let sstable = SSTable::<10>::from_memtable(&memtable, 1);
-        sstable.write(&mut storage, 0).unwrap();
+        let sstable = SSTable::from_memtable(&memtable, 1);
+        sstable.write(&mut storage).unwrap();
 
-        let read_sstable = SSTable::<10>::read(&mut storage, 0).unwrap();
+        let read_sstable = SSTable::read(&mut storage).unwrap();
         assert_eq!(read_sstable.get(&key), Some(&value[..]));
     }
 }

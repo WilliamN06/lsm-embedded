@@ -4,11 +4,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== lsm-embedded WASM Demo ===");
 
     let mut storage = WasmStorage::new();
-    let mut compactor = CompactionManager::<3, 3, 5>::new();
+    let mut compactor = CompactionManager::new(5);
 
     for batch in 0..2 {
         println!("Batch {}: Inserting 3 entries", batch);
-        let mut memtable = Memtable::<16, 128, 4>::new();
+        let mut memtable = Memtable::<16, 128>::new(10);
         let value = b"Test";
         
         for i in 0..3 {

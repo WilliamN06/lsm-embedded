@@ -1,6 +1,7 @@
 use crate::storage::Storage;
 use crate::StorageError;
 use core::fmt;
+use alloc::vec::Vec;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 use wasm_bindgen::prelude::*;

@@ -16,10 +16,9 @@ categories = ["embedded", "database", "wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-heapless = { version = "0.8", default-features = false }
 crc32fast = { version = "1.4", default-features = false }
 embedded-io = { version = "0.6", default-features = false }
-hash32 = { version = "0.3", default-features = false }
+hashbrown = { version = "0.14", default-features = false }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 log = { version = "0.4", optional = true }
@@ -33,8 +32,8 @@ serial_test = "2.0"
 
 [features]
 default = ["std"]
-std = ["embedded-io/std"]
-alloc = []
+std = ["embedded-io/std", "hashbrown/ahash"]
+alloc = ["hashbrown/ahash"]
 logging = ["log"]
 wasm = ["wasm-bindgen", "js-sys"]
 

@@ -7,7 +7,7 @@ fn bench_memtable_insert(c: &mut Criterion) {
     for size in [4, 8, 16].iter() {
         group.bench_with_input(BenchmarkId::new("insert", size), size, |b, &size| {
             b.iter(|| {
-                let mut memtable = Memtable::<16, 128, 32>::new();
+                let mut memtable = Memtable::<16, 128>::new(32);
                 let value = [42u8; 100];
                 for i in 0..size {
                     let mut key = [0u8; 16];
@@ -26,7 +26,7 @@ fn bench_sstable_write(c: &mut Criterion) {
     for size in [4, 8, 16].iter() {
         group.bench_with_input(BenchmarkId::new("write", size), size, |b, &size| {
             b.iter(|| {
-                let mut memtable = Memtable::<16, 128, 32>::new();
+                let mut memtable = Memtable::<16, 128>::new(32);
                 let value = [42u8; 100];
                 for i in 0..size {
                     let mut key = [0u8; 16];
@@ -34,9 +34,9 @@ fn bench_sstable_write(c: &mut Criterion) {
                     let _ = memtable.insert(&key, &value);
                 }
                 
-                let sstable = lsm_embedded::SSTable::<10>::from_memtable(&memtable, 1);
+                let sstable = lsm_embedded::SSTable::from_memtable(&memtable, 1);
                 let mut storage = InMemoryStorage::new();
-                let _ = sstable.write(&mut storage, 0);
+                let _ = sstable.write(&mut storage);
             });
         });
     }

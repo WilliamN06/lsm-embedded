@@ -1,9 +1,11 @@
 use crate::{BLOCK_SIZE, storage::Storage};
 use crate::storage::StorageError;
-use core::cmp::Ordering;
-use heapless::Vec;
+use alloc::vec::Vec;
 use crc32fast::Hasher;
 use core::fmt;
+
+const METADATA_MAGIC: u32 = 0x4D534C31;
+const METADATA_SIZE: usize = 64;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Block {
@@ -51,41 +53,57 @@ impl Block {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SSTableMetadata {
+    pub magic: u32,
+    pub version: u32,
     pub id: u32,
-    pub block_count: u16,
+    pub block_count: u32,
     pub key_count: u32,
     pub min_key: [u8; 16],
     pub max_key: [u8; 16],
     pub total_size: u64,
 }
 
-#[derive(Clone)]
-pub struct SSTable<const MAX_BLOCKS: usize> {
-    pub metadata: SSTableMetadata,
-    pub blocks: Vec<Block, MAX_BLOCKS>,
-    pub block_offsets: Vec<u64, MAX_BLOCKS>,
+impl SSTableMetadata {
+    pub fn new(id: u32, block_count: u32, key_count: u32, min_key: [u8; 16], max_key: [u8; 16], total_size: u64) -> Self {
+        Self {
+            magic: METADATA_MAGIC,
+            version: 1,
+            id,
+            block_count,
+            key_count,
+            min_key,
+            max_key,
+            total_size,
+        }
+    }
 }
 
-impl<const MAX_BLOCKS: usize> fmt::Debug for SSTable<MAX_BLOCKS> {
+#[derive(Clone)]
+pub struct SSTable {
+    pub metadata: SSTableMetadata,
+    pub blocks: Vec<Block>,
+    pub block_offsets: Vec<u64>,
+}
+
+impl fmt::Debug for SSTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SSTable")
             .field("metadata", &self.metadata)
-            .field("blocks", &self.blocks)
-            .field("block_offsets", &self.block_offsets)
+            .field("blocks", &self.blocks.len())
             .finish()
     }
 }
 
-impl<const MAX_BLOCKS: usize> SSTable<MAX_BLOCKS> {
-    pub fn from_memtable<const K: usize, const V: usize, const C: usize>(
-        memtable: &crate::memtable::Memtable<K, V, C>,
+impl SSTable {
+    pub fn from_memtable<const K: usize, const V: usize>(
+        memtable: &crate::memtable::Memtable<K, V>,
         id: u32,
     ) -> Self {
         let mut blocks = Vec::new();
         let mut block_offsets = Vec::new();
-        let mut current_block_data = Vec::<u8, BLOCK_SIZE>::new();
+        let mut current_block_data = Vec::<u8>::with_capacity(BLOCK_SIZE);
         let mut key_count = 0;
         let mut min_key = [0xFFu8; 16];
         let mut max_key = [0x00u8; 16];
@@ -95,14 +113,15 @@ impl<const MAX_BLOCKS: usize> SSTable<MAX_BLOCKS> {
             if current_block_data.len() + entry_size > BLOCK_SIZE && !current_block_data.is_empty() {
                 let block_data = current_block_data.as_slice();
                 let block = Block::new(block_data);
-                blocks.push(block).unwrap_or_else(|_| panic!("Block limit exceeded"));
+                blocks.push(block);
                 current_block_data.clear();
             }
 
-            current_block_data.extend_from_slice(&(K as u32).to_le_bytes()).unwrap();
-            current_block_data.extend_from_slice(&key[..]).unwrap();
-            current_block_data.extend_from_slice(&(value.len() as u32).to_le_bytes()).unwrap();
-            current_block_data.extend_from_slice(value).unwrap();
+            // Write: key_len (4 bytes), key (K bytes), value_len (4 bytes), value
+            current_block_data.extend_from_slice(&(K as u32).to_le_bytes());
+            current_block_data.extend_from_slice(&key[..]);
+            current_block_data.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            current_block_data.extend_from_slice(value);
 
             for i in 0..K.min(16) {
                 if key[i] < min_key[i] { min_key[i] = key[i]; }
@@ -113,65 +132,60 @@ impl<const MAX_BLOCKS: usize> SSTable<MAX_BLOCKS> {
 
         if !current_block_data.is_empty() {
             let block = Block::new(current_block_data.as_slice());
-            blocks.push(block).unwrap_or_else(|_| panic!("Block limit exceeded"));
+            blocks.push(block);
         }
 
         let mut offset = 0;
-        block_offsets.resize(blocks.len(), 0).unwrap();
-        for (i, _) in blocks.iter().enumerate() {
-            block_offsets[i] = offset;
+        block_offsets.reserve(blocks.len());
+        for _ in 0..blocks.len() {
+            block_offsets.push(offset);
             offset += (BLOCK_SIZE + 4) as u64;
         }
 
         Self {
-            metadata: SSTableMetadata {
-                id,
-                block_count: blocks.len() as u16,
-                key_count,
-                min_key,
-                max_key,
-                total_size: offset,
-            },
+            metadata: SSTableMetadata::new(id, blocks.len() as u32, key_count, min_key, max_key, offset),
             blocks,
             block_offsets,
         }
     }
 
-    pub fn write<STORAGE: Storage>(&self, storage: &mut STORAGE, base_offset: u64) -> Result<(), <STORAGE as Storage>::Error> {
+    pub fn write_at<STORAGE: Storage>(&self, storage: &mut STORAGE, base_offset: u64) -> Result<(), <STORAGE as Storage>::Error> {
+        let metadata_bytes = self.serialize_metadata();
+        storage.write_at(base_offset, &metadata_bytes)?;
+        
+        let data_start = base_offset + METADATA_SIZE as u64;
         for (i, block) in self.blocks.iter().enumerate() {
-            let offset = base_offset + self.block_offsets[i];
+            let offset = data_start + self.block_offsets[i];
             block.write(storage, offset)?;
         }
-        
-        let metadata_offset = base_offset + self.total_size();
-        let metadata_bytes = self.serialize_metadata();
-        storage.write_at(metadata_offset, &metadata_bytes)?;
-        
-        let end_marker = [0xFF, 0xFF, 0xFF, 0xFF];
-        storage.write_at(metadata_offset + metadata_bytes.len() as u64, &end_marker)
+        Ok(())
     }
 
-    pub fn read<STORAGE: Storage>(storage: &mut STORAGE, base_offset: u64) -> Result<Self, <STORAGE as Storage>::Error> {
-        let mut metadata_bytes = [0u8; 64];
+    pub fn read_at<STORAGE: Storage>(storage: &mut STORAGE, base_offset: u64) -> Result<Self, <STORAGE as Storage>::Error> {
+        let mut metadata_bytes = [0u8; METADATA_SIZE];
         storage.read_at(base_offset, &mut metadata_bytes)?;
         
-        let metadata = Self::deserialize_metadata(&metadata_bytes)
-            .map_err(|e| e.into())?;
+        let metadata = Self::deserialize_metadata(&metadata_bytes)?;
+        
+        if metadata.magic != METADATA_MAGIC {
+            return Err(StorageError::Corruption.into());
+        }
         
         let total_blocks = metadata.block_count as usize;
-        let mut blocks = Vec::new();
-        let mut block_offsets = Vec::new();
+        let mut blocks = Vec::with_capacity(total_blocks);
+        let mut block_offsets = Vec::with_capacity(total_blocks);
         
+        let data_start = base_offset + METADATA_SIZE as u64;
         for i in 0..total_blocks {
-            let offset = base_offset + (i as u64) * (BLOCK_SIZE as u64 + 4);
+            let offset = data_start + (i as u64) * (BLOCK_SIZE as u64 + 4);
             let block = Block::read(storage, offset)?;
             
             if !block.verify() {
                 return Err(StorageError::Corruption.into());
             }
             
-            blocks.push(block).map_err(|_| StorageError::Corruption.into())?;
-            block_offsets.push(offset).map_err(|_| StorageError::Corruption.into())?;
+            blocks.push(block);
+            block_offsets.push(offset - data_start);
         }
         
         Ok(Self {
@@ -181,80 +195,57 @@ impl<const MAX_BLOCKS: usize> SSTable<MAX_BLOCKS> {
         })
     }
 
+    pub fn write<STORAGE: Storage>(&self, storage: &mut STORAGE) -> Result<(), <STORAGE as Storage>::Error> {
+        self.write_at(storage, 0)
+    }
+
+    pub fn read<STORAGE: Storage>(storage: &mut STORAGE) -> Result<Self, <STORAGE as Storage>::Error> {
+        Self::read_at(storage, 0)
+    }
+
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        let key_len = key.len().min(16);
-        if key < &self.metadata.min_key[..key_len] || key > &self.metadata.max_key[..key_len] {
-            return None;
-        }
-        
-        let mut lo = 0;
-        let mut hi = self.blocks.len();
-        
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let block = &self.blocks[mid];
-            
-            if let Some(first_key) = Self::get_first_key_from_block(block) {
-                match first_key.as_slice().cmp(key) {
-                    Ordering::Equal => {
-                        return Self::search_block_for_key(block, key);
-                    }
-                    Ordering::Less => lo = mid + 1,
-                    Ordering::Greater => hi = mid,
-                }
-            } else {
-                break;
+        for block in &self.blocks {
+            if let Some(value) = Self::find_key_in_block(block, key) {
+                return Some(value);
             }
         }
-        
-        if lo < self.blocks.len() {
-            return Self::search_block_for_key(&self.blocks[lo], key);
-        }
-        
         None
     }
 
-    fn get_first_key_from_block(block: &Block) -> Option<[u8; 16]> {
-        let data = &block.data;
-        if data.len() < 4 {
-            return None;
-        }
-        let key_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if key_len != 16 || data.len() < 4 + 16 {
-            return None;
-        }
-        let mut key = [0u8; 16];
-        key.copy_from_slice(&data[4..4 + 16]);
-        Some(key)
-    }
-
-    fn search_block_for_key<'a>(block: &'a Block, key: &[u8]) -> Option<&'a [u8]> {
+    fn find_key_in_block<'a>(block: &'a Block, key: &[u8]) -> Option<&'a [u8]> {
         let data = &block.data;
         let mut pos = 0;
+        let key_len = key.len();
         
         while pos + 4 <= data.len() {
-            let key_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            // Read key length from the block
+            let block_key_len = u32::from_le_bytes([
+                data[pos], data[pos+1], data[pos+2], data[pos+3]
+            ]) as usize;
             pos += 4;
             
-            if pos + key_len > data.len() {
+            if pos + block_key_len > data.len() {
                 break;
             }
             
-            let block_key = &data[pos..pos + key_len];
-            pos += key_len;
+            let block_key = &data[pos..pos + block_key_len];
+            pos += block_key_len;
             
             if pos + 4 > data.len() {
                 break;
             }
             
-            let val_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            let val_len = u32::from_le_bytes([
+                data[pos], data[pos+1], data[pos+2], data[pos+3]
+            ]) as usize;
             pos += 4;
             
             if pos + val_len > data.len() {
                 break;
             }
             
-            if block_key == key {
+            // Compare keys
+            if block_key_len == key_len && block_key == key {
                 return Some(&data[pos..pos + val_len]);
             }
             
@@ -265,39 +256,191 @@ impl<const MAX_BLOCKS: usize> SSTable<MAX_BLOCKS> {
     }
 
     pub fn total_size(&self) -> u64 {
-        self.metadata.total_size
+        self.metadata.total_size + METADATA_SIZE as u64
     }
 
-    fn serialize_metadata(&self) -> [u8; 64] {
-        let mut bytes = [0u8; 64];
-        bytes[0..4].copy_from_slice(&self.metadata.id.to_le_bytes());
-        bytes[4..6].copy_from_slice(&self.metadata.block_count.to_le_bytes());
-        bytes[6..10].copy_from_slice(&self.metadata.key_count.to_le_bytes());
-        bytes[10..26].copy_from_slice(&self.metadata.min_key);
-        bytes[26..42].copy_from_slice(&self.metadata.max_key);
-        bytes[42..50].copy_from_slice(&self.metadata.total_size.to_le_bytes());
+    fn serialize_metadata(&self) -> [u8; METADATA_SIZE] {
+        let mut bytes = [0u8; METADATA_SIZE];
+        let mut pos = 0;
+        
+        bytes[pos..pos+4].copy_from_slice(&self.metadata.magic.to_le_bytes());
+        pos += 4;
+        
+        bytes[pos..pos+4].copy_from_slice(&self.metadata.version.to_le_bytes());
+        pos += 4;
+        
+        bytes[pos..pos+4].copy_from_slice(&self.metadata.id.to_le_bytes());
+        pos += 4;
+        
+        bytes[pos..pos+4].copy_from_slice(&self.metadata.block_count.to_le_bytes());
+        pos += 4;
+        
+        bytes[pos..pos+4].copy_from_slice(&self.metadata.key_count.to_le_bytes());
+        pos += 4;
+        
+        bytes[pos..pos+16].copy_from_slice(&self.metadata.min_key);
+        pos += 16;
+        
+        bytes[pos..pos+16].copy_from_slice(&self.metadata.max_key);
+        pos += 16;
+        
+        bytes[pos..pos+8].copy_from_slice(&self.metadata.total_size.to_le_bytes());
+        
         bytes
     }
 
-    fn deserialize_metadata(bytes: &[u8; 64]) -> Result<SSTableMetadata, StorageError> {
+    fn deserialize_metadata(bytes: &[u8; METADATA_SIZE]) -> Result<SSTableMetadata, StorageError> {
+        let mut pos = 0;
+        
+        let magic = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]
+        ]);
+        pos += 4;
+        
+        let version = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]
+        ]);
+        pos += 4;
+        
+        let id = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]
+        ]);
+        pos += 4;
+        
+        let block_count = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]
+        ]);
+        pos += 4;
+        
+        let key_count = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3]
+        ]);
+        pos += 4;
+        
+        let mut min_key = [0u8; 16];
+        min_key.copy_from_slice(&bytes[pos..pos+16]);
+        pos += 16;
+        
+        let mut max_key = [0u8; 16];
+        max_key.copy_from_slice(&bytes[pos..pos+16]);
+        pos += 16;
+        
+        let total_size = u64::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+            bytes[pos+4], bytes[pos+5], bytes[pos+6], bytes[pos+7]
+        ]);
+        
         Ok(SSTableMetadata {
-            id: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            block_count: u16::from_le_bytes([bytes[4], bytes[5]]),
-            key_count: u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
-            min_key: {
-                let mut key = [0u8; 16];
-                key.copy_from_slice(&bytes[10..26]);
-                key
-            },
-            max_key: {
-                let mut key = [0u8; 16];
-                key.copy_from_slice(&bytes[26..42]);
-                key
-            },
-            total_size: u64::from_le_bytes([
-                bytes[42], bytes[43], bytes[44], bytes[45],
-                bytes[46], bytes[47], bytes[48], bytes[49]
-            ]),
+            magic,
+            version,
+            id,
+            block_count,
+            key_count,
+            min_key,
+            max_key,
+            total_size,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memtable::Memtable;
+    use crate::storage::InMemoryStorage;
+
+    type TestMemtable = Memtable<16, 1024>;
+
+    #[test]
+    fn test_block_checksum() {
+        let data = [1, 2, 3, 4, 5];
+        let block = Block::new(&data);
+        assert!(block.verify());
+        
+        let mut corrupted = block;
+        corrupted.data[0] = 99;
+        assert!(!corrupted.verify());
+    }
+
+    #[test]
+    fn test_sstable_contains_keys() {
+        let mut memtable = TestMemtable::new(10);
+        let value = [42u8; 50];
+        
+        for i in 0..5 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            memtable.insert(&key, &value).unwrap();
+        }
+        
+        let sstable = SSTable::from_memtable(&memtable, 1);
+        
+        assert_eq!(sstable.metadata.key_count, 5);
+        
+        for i in 0..5 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            let result = sstable.get(&key);
+            assert!(result.is_some(), "Key {} not found in SSTable", i);
+            assert_eq!(result, Some(&value[..]));
+        }
+    }
+
+    #[test]
+    fn test_sstable_roundtrip() {
+        let mut memtable = TestMemtable::new(10);
+        let value = [42u8; 50];
+        
+        for i in 0..5 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            memtable.insert(&key, &value).unwrap();
+        }
+        
+        let sstable = SSTable::from_memtable(&memtable, 1);
+        let mut storage = InMemoryStorage::new();
+        
+        sstable.write(&mut storage).unwrap();
+        let read_sstable = SSTable::read(&mut storage).unwrap();
+        
+        assert_eq!(read_sstable.metadata.id, 1);
+        assert_eq!(read_sstable.metadata.key_count, 5);
+        assert_eq!(read_sstable.metadata.block_count, sstable.metadata.block_count);
+        
+        for i in 0..5 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            let result = read_sstable.get(&key);
+            assert_eq!(result, Some(&value[..]), "Failed for key {}", i);
+        }
+    }
+
+    #[test]
+    fn test_sstable_write_at_read_at() {
+        let mut memtable = TestMemtable::new(10);
+        let value = [42u8; 50];
+        
+        for i in 0..3 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            memtable.insert(&key, &value).unwrap();
+        }
+        
+        let sstable = SSTable::from_memtable(&memtable, 1);
+        let mut storage = InMemoryStorage::new();
+        
+        let offset = 1024 * 1024;
+        sstable.write_at(&mut storage, offset).unwrap();
+        let read_sstable = SSTable::read_at(&mut storage, offset).unwrap();
+        
+        assert_eq!(read_sstable.metadata.id, 1);
+        assert_eq!(read_sstable.metadata.key_count, 3);
+        
+        for i in 0..3 {
+            let mut key = [0u8; 16];
+            key[0] = i;
+            let result = read_sstable.get(&key);
+            assert_eq!(result, Some(&value[..]), "Failed for key {}", i);
+        }
     }
 }

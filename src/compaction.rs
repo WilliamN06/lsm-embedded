@@ -1,33 +1,36 @@
 use crate::sstable::SSTable;
 use crate::storage::Storage;
-use heapless::Vec;
+use alloc::vec::Vec;
 
-pub struct Level<const MAX_TABLES: usize, const MAX_BLOCKS: usize> {
-    pub tables: Vec<SSTable<MAX_BLOCKS>, MAX_TABLES>,
+pub struct Level {
+    pub tables: Vec<SSTable>,
     pub total_size: u64,
     pub level_number: usize,
+    pub max_tables: usize,
 }
 
-impl<const MAX_TABLES: usize, const MAX_BLOCKS: usize> 
-    Level<MAX_TABLES, MAX_BLOCKS> 
-{
-    pub fn new(level_number: usize) -> Self {
+impl Level {
+    pub fn new(level_number: usize, max_tables: usize) -> Self {
         Self {
-            tables: Vec::new(),
+            tables: Vec::with_capacity(max_tables),
             total_size: 0,
             level_number,
+            max_tables,
         }
     }
 
-    pub fn add_table(&mut self, table: SSTable<MAX_BLOCKS>) -> Result<(), CompactionError> {
+    pub fn add_table(&mut self, table: SSTable) -> Result<(), CompactionError> {
         let size = table.total_size();
-        self.tables.push(table).map_err(|_| CompactionError::LevelFull)?;
+        if self.tables.len() >= self.max_tables {
+            return Err(CompactionError::LevelFull);
+        }
+        self.tables.push(table);
         self.total_size += size;
         Ok(())
     }
 
     pub fn is_full(&self) -> bool {
-        self.tables.len() >= MAX_TABLES
+        self.tables.len() >= self.max_tables
     }
 
     pub fn len(&self) -> usize {
@@ -50,13 +53,12 @@ impl<const MAX_TABLES: usize, const MAX_BLOCKS: usize>
     pub fn merge<STORAGE: Storage>(
         &mut self, 
         _storage: &mut STORAGE,
-    ) -> Result<SSTable<MAX_BLOCKS>, CompactionError> {
+    ) -> Result<SSTable, CompactionError> {
         if self.tables.is_empty() {
             return Err(CompactionError::NoTables);
         }
 
-        let mut merged = self.tables[0].clone();
-        merged.metadata.id = self.level_number as u32 + 100;
+        let merged = self.tables[0].clone();
         
         self.tables.clear();
         self.total_size = 0;
@@ -65,38 +67,46 @@ impl<const MAX_TABLES: usize, const MAX_BLOCKS: usize>
     }
 }
 
-pub struct CompactionManager<const L0_CAP: usize, const L1_CAP: usize, const MAX_BLOCKS: usize> {
-    levels: [Level<L0_CAP, MAX_BLOCKS>; 4],
+pub struct CompactionManager {
+    pub levels: [Level; 4],
     level_multipliers: [usize; 4],
     compacting: bool,
+    level_capacity: usize,
 }
 
-impl<const L0_CAP: usize, const L1_CAP: usize, const MAX_BLOCKS: usize> 
-    CompactionManager<L0_CAP, L1_CAP, MAX_BLOCKS> 
-{
-    pub fn new() -> Self {
+impl CompactionManager {
+    pub fn new(level_capacity: usize) -> Self {
         Self {
             levels: [
-                Level::new(0),
-                Level::new(1),
-                Level::new(2),
-                Level::new(3),
+                Level::new(0, level_capacity),
+                Level::new(1, level_capacity),
+                Level::new(2, level_capacity),
+                Level::new(3, level_capacity),
             ],
             level_multipliers: [1, 10, 100, 1000],
             compacting: false,
+            level_capacity,
         }
     }
 
-    pub fn add_table<STORAGE: Storage>(
+    pub fn flush_memtable<const K: usize, const V: usize, STORAGE: Storage>(
         &mut self,
-        table: SSTable<MAX_BLOCKS>,
+        memtable: &crate::memtable::Memtable<K, V>,
         storage: &mut STORAGE,
-        base_offset: u64,
     ) -> Result<(), CompactionError> {
-        table.write(storage, base_offset)
+        if memtable.is_empty() {
+            return Ok(());
+        }
+        
+        let id = (self.levels[0].len() + 1) as u32;
+        let sstable = SSTable::from_memtable(memtable, id);
+        
+        let offset = (id as u64) * 1024 * 1024;
+        sstable.write_at(storage, offset)
             .map_err(|_| CompactionError::WriteFailed)?;
         
-        self.levels[0].add_table(table)?;
+        self.levels[0].add_table(sstable)?;
+        
         self.maybe_compact(storage)?;
         
         Ok(())
@@ -132,9 +142,10 @@ impl<const L0_CAP: usize, const L1_CAP: usize, const MAX_BLOCKS: usize>
     ) -> Result<(), CompactionError> {
         self.compacting = true;
         
+        let level_capacity = self.level_capacity;
         let mut source_level = core::mem::replace(
             &mut self.levels[from_level],
-            Level::new(from_level),
+            Level::new(from_level, level_capacity),
         );
         
         if source_level.is_empty() {
@@ -143,8 +154,10 @@ impl<const L0_CAP: usize, const L1_CAP: usize, const MAX_BLOCKS: usize>
         }
         
         let merged = source_level.merge(storage)?;
-        let offset = self.get_next_offset(storage);
-        merged.write(storage, offset)
+        
+        let id = (self.levels[to_level].len() + 1) as u32 + 100;
+        let offset = (id as u64) * 1024 * 1024;
+        merged.write_at(storage, offset)
             .map_err(|_| CompactionError::WriteFailed)?;
         
         self.levels[to_level].add_table(merged)?;
@@ -156,27 +169,6 @@ impl<const L0_CAP: usize, const L1_CAP: usize, const MAX_BLOCKS: usize>
     fn get_level_max_size(&self, level: usize) -> usize {
         let base_size = 1024 * 1024;
         base_size * self.level_multipliers[level]
-    }
-
-    fn get_next_offset<STORAGE: Storage>(&self, storage: &mut STORAGE) -> u64 {
-        storage.capacity() / 4
-    }
-
-    pub fn flush_memtable<const K: usize, const V: usize, const C: usize, STORAGE: Storage>(
-        &mut self,
-        memtable: &crate::memtable::Memtable<K, V, C>,
-        storage: &mut STORAGE,
-    ) -> Result<(), CompactionError> {
-        if memtable.is_empty() {
-            return Ok(());
-        }
-        
-        let id = (self.levels[0].len() + 1) as u32;
-        let sstable = SSTable::<MAX_BLOCKS>::from_memtable(memtable, id);
-        let offset = self.get_next_offset(storage);
-        
-        self.add_table(sstable, storage, offset)?;
-        Ok(())
     }
 
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
@@ -252,29 +244,49 @@ pub struct CompactionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Memtable, storage::InMemoryStorage, DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE, DEFAULT_CAPACITY};
+    use crate::{Memtable, storage::InMemoryStorage};
 
-    type TestMemtable = Memtable<DEFAULT_KEY_SIZE, DEFAULT_VALUE_SIZE, DEFAULT_CAPACITY>;
-    type TestCompactor = CompactionManager<5, 5, 10>;
+    type TestMemtable = Memtable<16, 1024>;
+
+    // Helper to create consistent keys
+    fn make_key(value: u32) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[0..4].copy_from_slice(&value.to_le_bytes());
+        key
+    }
 
     #[test]
     fn test_compaction_flow() {
-        let mut compactor = TestCompactor::new();
+        let mut compactor = CompactionManager::new(5);
         let mut storage = InMemoryStorage::new();
-        let mut memtable = TestMemtable::new();
+        let mut memtable = TestMemtable::new(10);
         
         let value = [42u8; 50];
+        
+        // Insert 5 entries with keys 0..4
         for i in 0..5 {
-            let mut key = [0u8; DEFAULT_KEY_SIZE];
-            key[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            let key = make_key(i);
             memtable.insert(&key, &value).unwrap();
         }
         
+        // Use the same key format for searching
+        let test_key = make_key(1);
+        
+        // Verify memtable has data
+        let memtable_result = memtable.get(&test_key);
+        assert!(memtable_result.is_some(), "Memtable should have the key");
+        assert_eq!(memtable_result, Some(&value[..]));
+        
+        // Flush memtable to level 0
         compactor.flush_memtable(&memtable, &mut storage).unwrap();
+        
+        // Verify table is in level 0
         assert_eq!(compactor.levels[0].len(), 1);
         
-        let test_key = [1u8; DEFAULT_KEY_SIZE];
-        assert!(compactor.get(&test_key).is_some());
+        // Verify we can read the data from the compaction manager
+        let result = compactor.get(&test_key);
+        assert!(result.is_some(), "Key not found in compaction manager");
+        assert_eq!(result, Some(&value[..]));
         
         let stats = compactor.stats();
         assert_eq!(stats.total_tables, 1);
