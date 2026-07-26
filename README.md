@@ -1,8 +1,6 @@
 # lsm-embedded
 
-[![Crates.io](https://img.shields.io/crates/v/lsm-embedded)](https://crates.io/crates/lsm-embedded)
-[![Docs](https://docs.rs/lsm-embedded/badge.svg)](https://docs.rs/lsm-embedded)
-[![CI](https://github.com/yourusername/lsm-embedded/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/lsm-embedded/actions)
+
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
 **Write-optimised LSM storage for WASM and embedded devices.**
